@@ -1,13 +1,210 @@
-# ECR → EC2 CI/CD   
+# GitHub Actions CI/CD Template: Docker Build, Push to Amazon ECR, Roll Out on EC2
 
+**Simple AWS deploy pipeline for small apps and POCs.** Push to `main` and GitHub Actions builds a Docker image, pushes it to **Amazon Elastic Container Registry (ECR)**, SSHs into **Amazon EC2**, pulls the new image, and replaces the running container.
 
-Simple **React (Vite) + Node (Express)** app. Push to `main` and GitHub Actions:
+Use this as a **copy-paste DevOps template**: Vite + Node starter, IAM policies, GitHub secrets, and a working ECR → EC2 rollout. Good for learning AWS CI/CD, shipping a side project, or showcasing GitHub Actions + Docker + ECR + EC2 on a resume or portfolio.
 
-1. Builds one Docker image
-2. Pushes it to **Amazon ECR**
-3. SSHs into **EC2**, pulls the image, and rolls the running container
+```
+git push → GitHub Actions (CI/CD)
+              │
+              ├─ docker build
+              ├─ docker push  →  Amazon ECR
+              └─ SSH to EC2   →  docker login → pull → stop → run :80
+```
 
-The UI calls `/api/health` so you can confirm the new git SHA after each deploy.
+One container serves the React (Vite) UI and a Node (Express) API. `/api/health` returns the git SHA so you can confirm the new version is live.
+
+**Suggested GitHub repository name:** `github-actions-ecr-ec2-cicd-template`
+
+| Name | When to use it |
+| --- | --- |
+| **`github-actions-ecr-ec2-cicd-template`** | Best for search and for “template” clones |
+| `simple-aws-cicd-small-apps` | Broader; less AWS-specific |
+| `docker-ecr-ec2-rollout` | Short; focuses on the deploy path |
+
+GitHub topics to add: `github-actions`, `cicd`, `docker`, `amazon-ecr`, `amazon-ec2`, `aws`, `devops`, `vite`, `nodejs`, `deploy-template`.
+
+---
+
+## Who this CI/CD template is for
+
+- Rolling out a **small web app** or **POC** without ECS, EKS, or Elastic Beanstalk
+- A **DevOps / cloud portfolio project** that proves you can wire GitHub Actions to AWS
+- A starting point you can swap the app for (keep the Dockerfile + workflow + IAM)
+
+Not a production HA platform. One EC2, one container, SSH deploy. Fine for demos, internal tools, and learning.
+
+---
+
+## What you get
+
+| Piece | Role |
+| --- | --- |
+| `client/` | React + Vite frontend |
+| `server/` | Express API + static files |
+| `Dockerfile` | Multi-stage image (build UI, run Node) |
+| `.github/workflows/deploy.yml` | Build → ECR push → EC2 roll |
+| `infra/github-actions-iam-policy.json` | IAM for **push** from GitHub Actions |
+| `infra/ec2-instance-role-policy.json` | IAM for **pull** on EC2 |
+| `scripts/ec2-bootstrap.sh` | Docker + AWS CLI on a fresh instance |
+
+---
+
+## Two AWS identities (do not mix)
+
+| Identity | Type | Used where | Permission |
+| --- | --- | --- | --- |
+| GitHub Actions IAM **user** | Access key in GitHub secrets | GitHub-hosted runner | ECR **push** |
+| EC2 IAM **role** `ec2-ecr-pull` | Instance profile | The EC2 VM | ECR **pull** |
+
+GitHub keys never go on the instance. EC2 has no long-lived keys.
+
+---
+
+## 1. IAM user for GitHub Actions (ECR push)
+
+1. IAM → **Users** → **Create user** (example: `github-ecr-push`).
+2. Attach an inline or customer managed policy from `infra/github-actions-iam-policy.json`.
+3. Create an **access key**. Store ID + secret in GitHub.
+
+The policy allows registry login, creating/describing the ECR repo, uploading layers, and `PutImage`.
+
+---
+
+## 2. IAM role for EC2 (ECR pull)
+
+### Create the role
+
+1. IAM → **Roles** → **Create role**.
+2. Trusted entity: **AWS service** → **EC2** → Next.
+3. Skip managed policies → Next.
+4. Role name: **`ec2-ecr-pull`** → Create role.
+
+### Attach the pull policy
+
+1. Open `ec2-ecr-pull` → **Add permissions** → **Create inline policy**.
+2. JSON → paste `infra/ec2-instance-role-policy.json` (ECR login + pull).
+3. Name it `ecr-pull` → Create policy.
+
+### Attach the role to the instance
+
+1. EC2 → Instances → select the instance.
+2. **Actions** → **Security** → **Modify IAM role**.
+3. Choose `ec2-ecr-pull` → Update. Wait ~30 seconds.
+
+On the instance this must show the role ARN:
+
+```bash
+aws sts get-caller-identity
+```
+
+Success looks like `assumed-role/ec2-ecr-pull/i-xxxxxxxx`. If you see `Unable to locate credentials`, the instance profile is missing or not applied yet.
+
+---
+
+## 3. EC2 for a simple Docker rollout
+
+Amazon Linux 2023 with a **public IPv4** (or Elastic IP).
+
+Security group:
+
+| Port | Source | Why |
+| --- | --- | --- |
+| 22 | `0.0.0.0/0` for this POC (GitHub runners have no single IP) | GitHub Actions SSH |
+| 80 | `0.0.0.0/0` or your IP | App + workflow health check |
+
+SSH as `ec2-user`.
+
+```bash
+sudo dnf update -y
+sudo dnf install -y docker
+sudo systemctl enable --now docker
+sudo usermod -aG docker $USER
+```
+
+`enable --now` **starts** the Docker daemon. Install alone is not enough.
+
+Log out of SSH and back in, then:
+
+```bash
+docker version
+aws sts get-caller-identity
+```
+
+`docker version` must show Client **and** Server.
+
+Test ECR login (no spaces in the registry URL; use your account and region):
+
+```bash
+aws ecr get-login-password --region us-east-1 \
+  | docker login --username AWS --password-stdin ACCOUNT.dkr.ecr.us-east-1.amazonaws.com
+```
+
+Expect `Login Succeeded`. Or run `scripts/ec2-bootstrap.sh` for Docker + AWS CLI.
+
+---
+
+## 4. Amazon ECR
+
+The workflow creates the repository if it does not exist. You can also create it in the console (example: `ecr-ec2-app`) in the **same region** as `AWS_REGION`.
+
+---
+
+## 5. GitHub Actions secrets
+
+Repo → **Settings** → **Secrets and variables** → **Actions**.
+
+| Secret | Value |
+| --- | --- |
+| `AWS_ACCESS_KEY_ID` | GitHub IAM **user** access key |
+| `AWS_SECRET_ACCESS_KEY` | That user’s secret |
+| `AWS_REGION` | e.g. `us-east-1` |
+| `ECR_REPOSITORY` | e.g. `ecr-ec2-app` |
+| `EC2_HOST` | **Public IPv4 only** — no `http://`, no quotes, not `172.31.x.x` |
+| `EC2_USER` | `ec2-user` |
+| `EC2_SSH_KEY` | Full private key, including `BEGIN` / `END` |
+| `EC2_PORT` | `22` (optional) |
+
+Private DNS such as `ip-172-31-24-73` fails from GitHub with `lookup ... no such host`.
+
+---
+
+## 6. How the pipeline rolls the new version
+
+Push to `main` or **Actions** → **Deploy to ECR and EC2** → **Run workflow**.
+
+1. Build the Docker image on GitHub-hosted Ubuntu.
+2. Push `ACCOUNT.dkr.ecr.REGION.amazonaws.com/REPO:<git-sha>` and `:latest`.
+3. SSH to EC2: `docker login` → `pull` → replace container `ecr-ec2-app` on host port **80**.
+4. `curl http://$EC2_HOST/api/health`.
+
+The runner keeps AWS keys. The SSH script only forwards `IMAGE`, `AWS_REGION`, `ECR_REGISTRY`, and `GIT_SHA`. Pull auth is the **instance role**.
+
+---
+
+## 7. Verify the deploy and read logs
+
+**Browser**
+
+- `http://<PUBLIC_IP>/`
+- `http://<PUBLIC_IP>/api/health`
+
+JSON should include `"status": "ok"` and `gitSha` matching the commit.
+
+**GitHub:** Actions → latest run → **Build, push, and roll**.
+
+**EC2:**
+
+```bash
+docker ps
+docker logs ecr-ec2-app
+docker logs -f ecr-ec2-app
+curl http://127.0.0.1/api/health
+```
+
+Expect `Server listening on 3000`.
+
+---
 
 ## Local development
 
@@ -18,78 +215,34 @@ npm run dev:server
 npm run dev:client
 ```
 
-- Frontend: http://localhost:5173 (proxies `/api` to Node)
+- UI: http://localhost:5173 (`/api` proxied to Node)
 - API: http://localhost:3000/api/health
-
-Build the same image the pipeline uses:
 
 ```bash
 docker build -t ecr-ec2-app:local .
 docker run --rm -p 3000:3000 -e GIT_SHA=local ecr-ec2-app:local
 ```
 
-## One-time AWS setup
+---
 
-### 1. ECR
+## Troubleshooting
 
-Create a repository (or let the workflow create it), for example `ecr-ec2-app`.
-
-### 2. EC2
-
-Use Amazon Linux 2023, public IP, and a security group that allows:
-
-| Port | Source | Why |
+| Symptom | Cause | Fix |
 | --- | --- | --- |
-| 22 | Your IP, or GitHub-hosted runners if you keep SSH open | Deploy over SSH |
-| 80 | `0.0.0.0/0` (or your IP) | App traffic |
+| `Unexpected input(s) 'script_stop'` | Unsupported ssh-action input | Warning only; remove that key if you edit the workflow |
+| `lookup ***: no such host` | `EC2_HOST` empty, private DNS, or not public | Secret = public IPv4 |
+| `docker: command not found` | Docker not installed on EC2 | `sudo dnf install -y docker` |
+| `Cannot connect to the Docker daemon` | Daemon not running | `sudo systemctl enable --now docker` |
+| `Unable to locate credentials` on EC2 | No instance role | Attach `ec2-ecr-pull`; wait; retry `sts` |
+| `"docker login" requires at most 1 argument` | Space in registry URL | `....dkr.ecr.us-east-1.amazonaws.com` with no spaces |
+| Health check fails from Actions | Security group missing inbound 80 | Allow TCP 80 |
 
-Attach an **instance profile** with `infra/ec2-instance-role-policy.json` so the box can pull from ECR without storing AWS keys on the instance.
+---
 
-SSH in once and install Docker + AWS CLI:
+## Skills this project demonstrates
 
-```bash
-# copy scripts/ec2-bootstrap.sh to the instance, then:
-bash ec2-bootstrap.sh
-```
+GitHub Actions CI/CD, Docker multi-stage builds, Amazon ECR push/pull, EC2 instance profiles vs IAM users, least-privilege policies, SSH-based container rollout, and a health-check gate after deploy.
 
-Log out and back in so the `docker` group applies. Confirm:
+## Security notes
 
-```bash
-docker version
-aws sts get-caller-identity
-```
-
-### 3. IAM user for GitHub Actions
-
-Create a user with `infra/github-actions-iam-policy.json`. Create an access key for that user.
-
-### 4. GitHub repository secrets
-
-| Secret | Example |
-| --- | --- |
-| `AWS_ACCESS_KEY_ID` | IAM user access key |
-| `AWS_SECRET_ACCESS_KEY` | IAM user secret |
-| `AWS_REGION` | `ap-south-1` |
-| `ECR_REPOSITORY` | `ecr-ec2-app` |
-| `EC2_HOST` | Public IPv4 of the instance |
-| `EC2_USER` | `ec2-user` (Amazon Linux) or `ubuntu` |
-| `EC2_SSH_KEY` | Full private key (`-----BEGIN ... KEY-----`) |
-| `EC2_PORT` | `22` |
-
-## Deploy
-
-Push to `main` (or run the **Deploy to ECR and EC2** workflow manually).
-
-The workflow tags the image with the commit SHA and `latest`, then on EC2 it:
-
-- `docker login` to ECR
-- `docker pull`
-- replaces container `ecr-ec2-app` (`stop` → `rm` → `run` on port 80)
-
-Open `http://<EC2_HOST>/` and check `/api/health` for the new SHA.
-
-## Notes
-
-- One container serves the Vite build and the Express API.
-- Keep port 22 locked down in production; GitHub-hosted runners do not have a single static IP. A tighter option later is AWS Systems Manager Session Manager instead of SSH.
-- Do not commit AWS keys or the EC2 `.pem` file.
+POC only: SSH from the internet is convenient, not production-tight. Prefer AWS Systems Manager later. Do not commit access keys or the `.pem` file. After `usermod -aG docker`, use a new SSH session (or `sudo docker`).
