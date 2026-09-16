@@ -1,0 +1,94 @@
+name: Deploy to ECR and EC2
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Build, push, and roll
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Ensure ECR repository exists
+        env:
+          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+        run: |
+          aws ecr describe-repositories --repository-names "$ECR_REPOSITORY" >/dev/null 2>&1 \
+            || aws ecr create-repository --repository-name "$ECR_REPOSITORY" --image-scanning-configuration scanOnPush=true
+
+      - name: Build and push image
+        id: build
+        env:
+          ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+          GIT_SHA: ${{ github.sha }}
+        run: |
+          IMAGE="$ECR_REGISTRY/$ECR_REPOSITORY"
+          docker build -t "$IMAGE:$GIT_SHA" -t "$IMAGE:latest" .
+          docker push "$IMAGE:$GIT_SHA"
+          docker push "$IMAGE:latest"
+          echo "image=$IMAGE:$GIT_SHA" >> "$GITHUB_OUTPUT"
+          echo "registry=$ECR_REGISTRY" >> "$GITHUB_OUTPUT"
+
+      - name: Pull and roll on EC2
+        uses: appleboy/ssh-action@v1.2.2
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          port: ${{ secrets.EC2_PORT != '' && secrets.EC2_PORT || 22 }}
+          script_stop: true
+          envs: IMAGE,AWS_REGION,ECR_REGISTRY,GIT_SHA
+          script: |
+            set -euo pipefail
+            aws ecr get-login-password --region "$AWS_REGION" \
+              | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+            docker pull "$IMAGE"
+            docker stop ecr-ec2-app || true
+            docker rm ecr-ec2-app || true
+            docker run -d \
+              --name ecr-ec2-app \
+              --restart unless-stopped \
+              -p 80:3000 \
+              -e GIT_SHA="$GIT_SHA" \
+              -e APP_VERSION="$GIT_SHA" \
+              "$IMAGE"
+            docker image prune -f >/dev/null || true
+            echo "Rolled $IMAGE"
+        env:
+          IMAGE: ${{ steps.build.outputs.image }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          ECR_REGISTRY: ${{ steps.build.outputs.registry }}
+          GIT_SHA: ${{ github.sha }}
+
+      - name: Verify health endpoint
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          for i in 1 2 3 4 5; do
+            if curl -fsS "http://$EC2_HOST/api/health"; then
+              echo
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "Health check failed"
+          exit 1

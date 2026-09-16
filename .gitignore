@@ -1,0 +1,17 @@
+# Client
+client/node_modules
+client/dist
+
+# Server
+server/node_modules
+server/public
+
+# Env / secrets
+.env
+*.pem
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode
+.idea
