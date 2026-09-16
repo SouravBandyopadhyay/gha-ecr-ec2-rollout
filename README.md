@@ -1,5 +1,6 @@
 # ECR → EC2 CI/CD   
 
+
 Simple **React (Vite) + Node (Express)** app. Push to `main` and GitHub Actions:
 
 1. Builds one Docker image
