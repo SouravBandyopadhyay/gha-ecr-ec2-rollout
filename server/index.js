@@ -12,6 +12,7 @@ app.get("/api/health", (_req, res) => {
     status: "ok",
     version: process.env.APP_VERSION || "1.0.0",
     gitSha: process.env.GIT_SHA || "local",
+    image: process.env.IMAGE_TAG || "local",
     time: new Date().toISOString(),
   });
 });

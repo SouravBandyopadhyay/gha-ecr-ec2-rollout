@@ -13,6 +13,7 @@
       "Action": [
         "ecr:CreateRepository",
         "ecr:DescribeRepositories",
+        "ecr:PutLifecyclePolicy",
         "ecr:BatchCheckLayerAvailability",
         "ecr:CompleteLayerUpload",
         "ecr:InitiateLayerUpload",

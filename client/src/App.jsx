@@ -44,6 +44,12 @@ export default function App() {
               </dd>
             </div>
             <div>
+              <dt>Image</dt>
+              <dd>
+                <code>{health.image}</code>
+              </dd>
+            </div>
+            <div>
               <dt>Time</dt>
               <dd>{health.time}</dd>
             </div>

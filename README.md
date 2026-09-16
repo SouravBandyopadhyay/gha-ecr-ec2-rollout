@@ -46,6 +46,7 @@ Not a production HA platform. One EC2, one container, SSH deploy. Fine for demos
 | `.github/workflows/deploy.yml` | Build → ECR push → EC2 roll |
 | `infra/github-actions-iam-policy.json` | IAM for **push** from GitHub Actions |
 | `infra/ec2-instance-role-policy.json` | IAM for **pull** on EC2 |
+| `infra/ecr-lifecycle-policy.json` | Keep last 5 SHA tags + 10 semver tags; drop untagged |
 | `scripts/ec2-bootstrap.sh` | Docker + AWS CLI on a fresh instance |
 
 ---
@@ -67,7 +68,7 @@ GitHub keys never go on the instance. EC2 has no long-lived keys.
 2. Attach an inline or customer managed policy from `infra/github-actions-iam-policy.json`.
 3. Create an **access key**. Store ID + secret in GitHub.
 
-The policy allows registry login, creating/describing the ECR repo, uploading layers, and `PutImage`.
+The policy allows registry login, creating/describing the ECR repo, uploading layers, `PutImage`, and `PutLifecyclePolicy` (so old images can be expired). If this user already exists, add `ecr:PutLifecyclePolicy` to it.
 
 ---
 
@@ -171,14 +172,32 @@ Private DNS such as `ip-172-31-24-73` fails from GitHub with `lookup ... no such
 
 ## 6. How the pipeline rolls the new version
 
-Push to `main` or **Actions** → **Deploy to ECR and EC2** → **Run workflow**.
+Push to `main`, push a git tag `v1.2.3`, or **Actions** → **Deploy to ECR and EC2** → **Run workflow**.
 
-1. Build the Docker image on GitHub-hosted Ubuntu.
-2. Push `ACCOUNT.dkr.ecr.REGION.amazonaws.com/REPO:<git-sha>` and `:latest`.
-3. SSH to EC2: `docker login` → `pull` → replace container `ecr-ec2-app` on host port **80**.
-4. `curl http://$EC2_HOST/api/health`.
+1. Build **one** Docker image (extra tags are names, not extra copies).
+2. Push tags:
+   - `latest` — moving pointer
+   - `sha-<7 chars>` — immutable rollout (this is what EC2 runs)
+   - `v1.2.3` — only if you pushed a git tag
+3. SSH to EC2: `docker login` → `pull sha-…` → replace `ecr-ec2-app` on port **80**.
+4. `curl http://$EC2_HOST/api/health` — `version` is `build-<run>` or `v1.2.3`, plus `gitSha` and `image`.
 
-The runner keeps AWS keys. The SSH script only forwards `IMAGE`, `AWS_REGION`, `ECR_REGISTRY`, and `GIT_SHA`. Pull auth is the **instance role**.
+Health `version` uses the GitHub run number (`build-12`) so you get a human version **without** another ECR tag.
+
+**Cost:** ECR stores each unique digest once. A lifecycle policy keeps the last **5** `sha-*` images and **10** `v*` images, and deletes **untagged** images after 1 day. We no longer prune all local images on EC2. Stop or terminate the instance when idle — that is still the real bill.
+
+Rollback on EC2 (tag must still exist):
+
+```bash
+aws ecr get-login-password --region us-east-1 \
+  | docker login --username AWS --password-stdin ACCOUNT.dkr.ecr.us-east-1.amazonaws.com
+docker pull ACCOUNT.dkr.ecr.us-east-1.amazonaws.com/REPO:sha-abc1234
+docker stop ecr-ec2-app && docker rm ecr-ec2-app
+docker run -d --name ecr-ec2-app --restart unless-stopped -p 80:3000 \
+  ACCOUNT.dkr.ecr.us-east-1.amazonaws.com/REPO:sha-abc1234
+```
+
+The runner keeps AWS keys. The SSH script forwards `IMAGE`, `AWS_REGION`, `ECR_REGISTRY`, `GIT_SHA`, and `APP_VERSION`. Pull auth is the **instance role**.
 
 ---
 
@@ -189,7 +208,7 @@ The runner keeps AWS keys. The SSH script only forwards `IMAGE`, `AWS_REGION`, `
 - `http://<PUBLIC_IP>/`
 - `http://<PUBLIC_IP>/api/health`
 
-JSON should include `"status": "ok"` and `gitSha` matching the commit.
+JSON should include `"status": "ok"`, `version` (`build-N` or `v1.2.3`), short `gitSha`, and `image` (`…:sha-……`).
 
 **GitHub:** Actions → latest run → **Build, push, and roll**.
 
@@ -229,7 +248,7 @@ docker run --rm -p 3000:3000 -e GIT_SHA=local ecr-ec2-app:local
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
-| `Unexpected input(s) 'script_stop'` | Unsupported ssh-action input | Warning only; remove that key if you edit the workflow |
+| `AccessDenied` on `PutLifecyclePolicy` | GitHub IAM user missing that action | Add `ecr:PutLifecyclePolicy` from `infra/github-actions-iam-policy.json` |
 | `lookup ***: no such host` | `EC2_HOST` empty, private DNS, or not public | Secret = public IPv4 |
 | `docker: command not found` | Docker not installed on EC2 | `sudo dnf install -y docker` |
 | `Cannot connect to the Docker daemon` | Daemon not running | `sudo systemctl enable --now docker` |
